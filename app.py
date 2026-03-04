@@ -18,6 +18,35 @@ from pptx.util import Emu
 from PIL import Image
 
 
+# ── 이미지 최적화 ────────────────────────────────────────────
+
+MAX_LONG_SIDE = 2000  # PPT 300DPI 기준 충분한 해상도
+JPEG_QUALITY = 90
+
+
+def optimize_image(src_path, dst_path):
+    """이미지 리사이즈 + JPEG 변환으로 용량 최적화 (화질 유지)"""
+    with Image.open(src_path) as img:
+        # RGBA → RGB (JPEG는 알파채널 미지원)
+        if img.mode in ("RGBA", "P"):
+            img = img.convert("RGB")
+
+        # 긴 변 기준 리사이즈
+        w, h = img.size
+        if max(w, h) > MAX_LONG_SIDE:
+            if w > h:
+                new_w = MAX_LONG_SIDE
+                new_h = int(h * MAX_LONG_SIDE / w)
+            else:
+                new_h = MAX_LONG_SIDE
+                new_w = int(w * MAX_LONG_SIDE / h)
+            img = img.resize((new_w, new_h), Image.LANCZOS)
+
+        img.save(dst_path, "JPEG", quality=JPEG_QUALITY, optimize=True)
+
+    return dst_path
+
+
 # ── 파일명 파싱 ──────────────────────────────────────────────
 
 def parse_image_filename(filename):
@@ -239,6 +268,12 @@ if st.button("PPT 생성", type="primary", use_container_width=True):
 
             try:
                 # 이미지 파일을 임시 디렉토리에 저장
+                raw_dir = os.path.join(tmp_dir, "raw")
+                opt_dir = os.path.join(tmp_dir, "opt")
+                os.makedirs(raw_dir, exist_ok=True)
+                os.makedirs(opt_dir, exist_ok=True)
+
+                raw_files = {}  # basename -> raw path
                 if upload_mode == "ZIP 파일 업로드":
                     with zipfile.ZipFile(io.BytesIO(image_files.read())) as zf:
                         for name in zf.namelist():
@@ -247,20 +282,37 @@ if st.button("PPT 생성", type="primary", use_container_width=True):
                             basename = os.path.basename(name)
                             ext = os.path.splitext(basename)[1].lower()
                             if ext in (".png", ".jpg", ".jpeg"):
-                                tmp_path = os.path.join(tmp_dir, basename)
+                                tmp_path = os.path.join(raw_dir, basename)
                                 with open(tmp_path, "wb") as f:
                                     f.write(zf.read(name))
-                                file_map[basename] = tmp_path
+                                raw_files[basename] = tmp_path
                 else:
                     for uf in image_files:
-                        tmp_path = os.path.join(tmp_dir, uf.name)
+                        tmp_path = os.path.join(raw_dir, uf.name)
                         with open(tmp_path, "wb") as f:
                             f.write(uf.read())
-                        file_map[uf.name] = tmp_path
+                        raw_files[uf.name] = tmp_path
 
-                if not file_map:
+                if not raw_files:
                     st.error("업로드된 이미지가 없습니다.")
                 else:
+                    # 이미지 최적화
+                    opt_status = st.empty()
+                    total_raw = sum(os.path.getsize(p) for p in raw_files.values())
+
+                    for i, (basename, raw_path) in enumerate(raw_files.items()):
+                        opt_name = os.path.splitext(basename)[0] + ".jpg"
+                        opt_path = os.path.join(opt_dir, opt_name)
+                        optimize_image(raw_path, opt_path)
+                        file_map[basename] = opt_path
+                        opt_status.text(f"이미지 최적화 중... {i + 1}/{len(raw_files)}")
+
+                    total_opt = sum(os.path.getsize(p) for p in file_map.values())
+                    ratio = (1 - total_opt / total_raw) * 100 if total_raw > 0 else 0
+                    opt_status.text(
+                        f"이미지 최적화 완료: {total_raw/1024/1024:.0f}MB → {total_opt/1024/1024:.1f}MB ({ratio:.0f}% 절감)"
+                    )
+
                     progress = st.progress(0)
                     template_bytes = template_file.read()
 
