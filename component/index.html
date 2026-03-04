@@ -39,6 +39,16 @@
   }
   .status { font-size: 13px; color: #555; margin-top: 6px; }
   .summary { font-size: 13px; color: #0a7; font-weight: 600; margin-top: 8px; }
+
+  /* dark mode */
+  @media (prefers-color-scheme: dark) {
+    .drop-zone { background: #262730; border-color: #555; }
+    .drop-zone:hover, .drop-zone.dragover { border-color: #ff4b4b; background: #332020; }
+    .drop-zone h3 { color: #eee; }
+    .drop-zone p { color: #999; }
+    .progress-bar { background: #333; }
+    .status { color: #aaa; }
+  }
 </style>
 </head>
 <body>
@@ -56,23 +66,42 @@
 </div>
 
 <script>
-// ── Streamlit Component 통신 ──
-function sendToStreamlit(data) {
-  window.parent.postMessage({
-    type: "streamlit:setComponentValue",
-    value: data
-  }, "*");
+// ── Streamlit Component 통신 프로토콜 ──
+
+function sendMessageToStreamlit(type, data) {
+  const msg = Object.assign({ isStreamlitMessage: true, type: type }, data || {});
+  window.parent.postMessage(msg, "*");
 }
 
-function setFrameHeight(h) {
-  window.parent.postMessage({
-    type: "streamlit:setFrameHeight",
-    height: h
-  }, "*");
+function setComponentReady() {
+  sendMessageToStreamlit("streamlit:componentReady", { apiVersion: 1 });
 }
 
-// 초기 높이 설정
-window.addEventListener("load", () => setFrameHeight(160));
+function setComponentValue(value) {
+  sendMessageToStreamlit("streamlit:setComponentValue", { value: value });
+}
+
+function setFrameHeight(height) {
+  sendMessageToStreamlit("streamlit:setFrameHeight", { height: height });
+}
+
+// Streamlit render 이벤트 수신
+window.addEventListener("message", (event) => {
+  if (event.data.type === "streamlit:render") {
+    // 테마 적용 (선택)
+    const theme = event.data.theme;
+    if (theme) {
+      document.body.style.color = theme.textColor;
+      const dz = document.getElementById("dropZone");
+      dz.style.borderColor = theme.secondaryBackgroundColor;
+    }
+    setFrameHeight(document.body.scrollHeight);
+  }
+});
+
+// 컴포넌트 준비 완료 신호
+setComponentReady();
+setFrameHeight(160);
 
 // ── 설정 ──
 const MAX_LONG_SIDE = 2000;
@@ -104,7 +133,6 @@ function compressImage(file) {
     img.onload = () => {
       let w = img.width, h = img.height;
 
-      // 리사이즈
       if (Math.max(w, h) > MAX_LONG_SIDE) {
         if (w > h) {
           h = Math.round(h * MAX_LONG_SIDE / w);
@@ -120,13 +148,12 @@ function compressImage(file) {
       canvas.height = h;
       canvas.getContext("2d").drawImage(img, 0, 0, w, h);
 
-      // JPEG로 변환
       canvas.toBlob((blob) => {
         const reader = new FileReader();
         reader.onload = () => {
           resolve({
             name: file.name,
-            data: reader.result.split(",")[1],  // base64 only (no prefix)
+            data: reader.result.split(",")[1],
             size_original: file.size,
             size_compressed: blob.size
           });
@@ -150,14 +177,17 @@ async function handleFiles(fileList) {
   }
 
   progressArea.style.display = "block";
-  setFrameHeight(200);
+  setFrameHeight(document.body.scrollHeight + 40);
 
   const results = [];
   let totalOriginal = 0;
   let totalCompressed = 0;
 
   for (let i = 0; i < files.length; i++) {
-    statusText.textContent = `압축 중... ${i + 1}/${files.length} — ${files[i].name.substring(0, 40)}`;
+    const shortName = files[i].name.length > 40
+      ? files[i].name.substring(0, 37) + "..."
+      : files[i].name;
+    statusText.textContent = `압축 중... ${i + 1}/${files.length} — ${shortName}`;
     progressFill.style.width = `${((i + 1) / files.length) * 100}%`;
 
     const result = await compressImage(files[i]);
@@ -173,10 +203,11 @@ async function handleFiles(fileList) {
   statusText.textContent = `${files.length}개 이미지 압축 완료`;
   summaryText.textContent = `${origMB}MB → ${compMB}MB (${savePct}% 절감) — 서버로 전송 중...`;
 
-  // Streamlit으로 전송
-  sendToStreamlit(JSON.stringify(results));
+  // Streamlit으로 압축된 데이터 전송
+  setComponentValue(JSON.stringify(results));
 
   summaryText.textContent = `${origMB}MB → ${compMB}MB (${savePct}% 절감) — 전송 완료!`;
+  setFrameHeight(document.body.scrollHeight);
 }
 </script>
 </body>
