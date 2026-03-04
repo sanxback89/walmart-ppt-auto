@@ -1,16 +1,18 @@
 """
 Walmart Image → PPT 자동화 (Streamlit)
-1. 이미지 폴더(zip) 또는 파일 업로드
-2. PPT 템플릿 업로드
-3. 자동 생성 → 다운로드
+- 브라우저에서 이미지 압축 후 전송 (13MB → ~300KB)
+- PPT 템플릿에 자동 삽입
 """
 
 import streamlit as st
+import streamlit.components.v1 as components
 import tempfile
 import zipfile
 import os
 import re
 import io
+import json
+import base64
 from copy import deepcopy
 from lxml import etree
 from pptx import Presentation
@@ -18,33 +20,19 @@ from pptx.util import Emu
 from PIL import Image
 
 
-# ── 이미지 최적화 ────────────────────────────────────────────
+# ── 브라우저 이미지 압축 컴포넌트 ─────────────────────────────
 
-MAX_LONG_SIDE = 2000  # PPT 300DPI 기준 충분한 해상도
-JPEG_QUALITY = 90
+COMPONENT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "component")
+
+_image_compressor = components.declare_component(
+    "image_compressor",
+    path=COMPONENT_DIR,
+)
 
 
-def optimize_image(src_path, dst_path):
-    """이미지 리사이즈 + JPEG 변환으로 용량 최적화 (화질 유지)"""
-    with Image.open(src_path) as img:
-        # RGBA → RGB (JPEG는 알파채널 미지원)
-        if img.mode in ("RGBA", "P"):
-            img = img.convert("RGB")
-
-        # 긴 변 기준 리사이즈
-        w, h = img.size
-        if max(w, h) > MAX_LONG_SIDE:
-            if w > h:
-                new_w = MAX_LONG_SIDE
-                new_h = int(h * MAX_LONG_SIDE / w)
-            else:
-                new_h = MAX_LONG_SIDE
-                new_w = int(w * MAX_LONG_SIDE / h)
-            img = img.resize((new_w, new_h), Image.LANCZOS)
-
-        img.save(dst_path, "JPEG", quality=JPEG_QUALITY, optimize=True)
-
-    return dst_path
+def image_compressor(key=None):
+    """브라우저에서 이미지를 압축한 뒤 base64 JSON으로 반환하는 컴포넌트"""
+    return _image_compressor(key=key, default=None)
 
 
 # ── 파일명 파싱 ──────────────────────────────────────────────
@@ -78,10 +66,6 @@ def _extract_colorway(key):
 
 
 def group_images(file_map):
-    """
-    file_map: {filename: filepath} → 디자인별 그룹핑
-    Returns: {design_key: {artwork, colorway, front, back}}
-    """
     groups = {}
     for filename in sorted(file_map.keys()):
         ext = os.path.splitext(filename)[1].lower()
@@ -228,26 +212,43 @@ def generate_ppt(template_bytes, file_map, progress_bar=None):
     return output, len(designs)
 
 
+# ── base64 이미지 데이터 → 임시 파일 ─────────────────────────
+
+def save_compressed_images(json_str, tmp_dir):
+    """컴포넌트에서 받은 base64 JSON을 파일로 저장"""
+    items = json.loads(json_str)
+    file_map = {}
+
+    for item in items:
+        filename = item["name"]
+        data = base64.b64decode(item["data"])
+        # 확장자를 .jpg로 변환 (브라우저에서 JPEG으로 압축됨)
+        jpg_name = os.path.splitext(filename)[0] + ".jpg"
+        path = os.path.join(tmp_dir, jpg_name)
+        with open(path, "wb") as f:
+            f.write(data)
+        file_map[filename] = path
+
+    return file_map
+
+
 # ── Streamlit UI ─────────────────────────────────────────────
 
 st.set_page_config(page_title="Walmart Image → PPT", page_icon="📎", layout="centered")
 st.title("Walmart Image → PPT 자동화")
 
-# 1. 이미지 업로드
+# 1. 이미지 업로드 (브라우저 압축)
 st.subheader("1. 이미지 업로드")
-upload_mode = st.radio("업로드 방식", ["이미지 파일 직접 선택", "ZIP 파일 업로드"], horizontal=True)
+st.caption("브라우저에서 자동 압축 후 전송됩니다 (13MB → ~300KB/장)")
 
-image_files = None
-if upload_mode == "이미지 파일 직접 선택":
-    image_files = st.file_uploader(
-        "Front / Back 이미지를 모두 선택하세요",
-        type=["png", "jpg", "jpeg"],
-        accept_multiple_files=True,
-    )
-else:
-    zip_file = st.file_uploader("이미지가 들어있는 ZIP 파일", type=["zip"])
-    if zip_file:
-        image_files = zip_file  # 나중에 처리
+compressed_data = image_compressor(key="img_upload")
+
+if compressed_data:
+    try:
+        items = json.loads(compressed_data)
+        st.success(f"{len(items)}개 이미지 수신 완료")
+    except Exception:
+        pass
 
 # 2. PPT 템플릿
 st.subheader("2. PPT 템플릿 업로드")
@@ -257,62 +258,20 @@ template_file = st.file_uploader("빈 PPT 템플릿 (.pptx)", type=["pptx"])
 st.divider()
 
 if st.button("PPT 생성", type="primary", use_container_width=True):
-    if not image_files:
+    if not compressed_data:
         st.error("이미지를 업로드하세요.")
     elif not template_file:
         st.error("PPT 템플릿을 업로드하세요.")
     else:
         with st.spinner("PPT 생성 중..."):
             tmp_dir = tempfile.mkdtemp()
-            file_map = {}
 
             try:
-                # 이미지 파일을 임시 디렉토리에 저장
-                raw_dir = os.path.join(tmp_dir, "raw")
-                opt_dir = os.path.join(tmp_dir, "opt")
-                os.makedirs(raw_dir, exist_ok=True)
-                os.makedirs(opt_dir, exist_ok=True)
+                file_map = save_compressed_images(compressed_data, tmp_dir)
 
-                raw_files = {}  # basename -> raw path
-                if upload_mode == "ZIP 파일 업로드":
-                    with zipfile.ZipFile(io.BytesIO(image_files.read())) as zf:
-                        for name in zf.namelist():
-                            if name.startswith("__MACOSX") or name.startswith("."):
-                                continue
-                            basename = os.path.basename(name)
-                            ext = os.path.splitext(basename)[1].lower()
-                            if ext in (".png", ".jpg", ".jpeg"):
-                                tmp_path = os.path.join(raw_dir, basename)
-                                with open(tmp_path, "wb") as f:
-                                    f.write(zf.read(name))
-                                raw_files[basename] = tmp_path
-                else:
-                    for uf in image_files:
-                        tmp_path = os.path.join(raw_dir, uf.name)
-                        with open(tmp_path, "wb") as f:
-                            f.write(uf.read())
-                        raw_files[uf.name] = tmp_path
-
-                if not raw_files:
+                if not file_map:
                     st.error("업로드된 이미지가 없습니다.")
                 else:
-                    # 이미지 최적화
-                    opt_status = st.empty()
-                    total_raw = sum(os.path.getsize(p) for p in raw_files.values())
-
-                    for i, (basename, raw_path) in enumerate(raw_files.items()):
-                        opt_name = os.path.splitext(basename)[0] + ".jpg"
-                        opt_path = os.path.join(opt_dir, opt_name)
-                        optimize_image(raw_path, opt_path)
-                        file_map[basename] = opt_path
-                        opt_status.text(f"이미지 최적화 중... {i + 1}/{len(raw_files)}")
-
-                    total_opt = sum(os.path.getsize(p) for p in file_map.values())
-                    ratio = (1 - total_opt / total_raw) * 100 if total_raw > 0 else 0
-                    opt_status.text(
-                        f"이미지 최적화 완료: {total_raw/1024/1024:.0f}MB → {total_opt/1024/1024:.1f}MB ({ratio:.0f}% 절감)"
-                    )
-
                     progress = st.progress(0)
                     template_bytes = template_file.read()
 
@@ -331,6 +290,5 @@ if st.button("PPT 생성", type="primary", use_container_width=True):
             except Exception as e:
                 st.error(f"오류: {e}")
             finally:
-                # 임시 파일 정리
                 import shutil
                 shutil.rmtree(tmp_dir, ignore_errors=True)
