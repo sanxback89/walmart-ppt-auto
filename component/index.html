@@ -148,6 +148,11 @@ function compressImage(file) {
       canvas.height = h;
       canvas.getContext("2d").drawImage(img, 0, 0, w, h);
 
+      // PNG는 투명도 유지, JPG는 JPEG로 압축
+      const isPng = file.type === "image/png";
+      const outType = isPng ? "image/png" : "image/jpeg";
+      const blobArgs = isPng ? [outType] : [outType, JPEG_QUALITY];
+
       canvas.toBlob((blob) => {
         const reader = new FileReader();
         reader.onload = () => {
@@ -155,11 +160,12 @@ function compressImage(file) {
             name: file.name,
             data: reader.result.split(",")[1],
             size_original: file.size,
-            size_compressed: blob.size
+            size_compressed: blob.size,
+            mime: outType
           });
         };
         reader.readAsDataURL(blob);
-      }, "image/jpeg", JPEG_QUALITY);
+      }, ...blobArgs);
     };
     img.src = URL.createObjectURL(file);
   });

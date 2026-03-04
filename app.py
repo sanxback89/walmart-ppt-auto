@@ -222,9 +222,14 @@ def save_compressed_images(json_str, tmp_dir):
     for item in items:
         filename = item["name"]
         data = base64.b64decode(item["data"])
-        # 확장자를 .jpg로 변환 (브라우저에서 JPEG으로 압축됨)
-        jpg_name = os.path.splitext(filename)[0] + ".jpg"
-        path = os.path.join(tmp_dir, jpg_name)
+        # PNG는 투명도 유지, 나머지는 .jpg
+        mime = item.get("mime", "image/jpeg")
+        if mime == "image/png":
+            ext = ".png"
+        else:
+            ext = ".jpg"
+        out_name = os.path.splitext(filename)[0] + ext
+        path = os.path.join(tmp_dir, out_name)
         with open(path, "wb") as f:
             f.write(data)
         file_map[filename] = path
