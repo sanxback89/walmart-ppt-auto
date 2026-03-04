@@ -215,23 +215,21 @@ def generate_ppt(template_bytes, file_map, progress_bar=None):
 # ── base64 이미지 데이터 → 임시 파일 ─────────────────────────
 
 def save_compressed_images(json_str, tmp_dir):
-    """컴포넌트에서 받은 base64 JSON을 파일로 저장"""
+    """컴포넌트에서 받은 WebP base64 → PNG 변환 후 저장 (투명도 유지)"""
     items = json.loads(json_str)
     file_map = {}
 
     for item in items:
         filename = item["name"]
         data = base64.b64decode(item["data"])
-        # PNG는 투명도 유지, 나머지는 .jpg
-        mime = item.get("mime", "image/jpeg")
-        if mime == "image/png":
-            ext = ".png"
-        else:
-            ext = ".jpg"
-        out_name = os.path.splitext(filename)[0] + ext
+
+        # WebP → PNG 변환 (투명도 유지 + PPT 호환)
+        out_name = os.path.splitext(filename)[0] + ".png"
         path = os.path.join(tmp_dir, out_name)
-        with open(path, "wb") as f:
-            f.write(data)
+
+        with Image.open(io.BytesIO(data)) as img:
+            img.save(path, "PNG")
+
         file_map[filename] = path
 
     return file_map
@@ -242,16 +240,21 @@ def save_compressed_images(json_str, tmp_dir):
 st.set_page_config(page_title="Walmart Image → PPT", page_icon="📎", layout="centered")
 st.title("Walmart Image → PPT 자동화")
 
-# 1. 이미지 업로드 (브라우저 압축)
+# 1. 이미지 업로드 (브라우저에서 WebP 압축 → 서버에서 PNG 변환)
 st.subheader("1. 이미지 업로드")
-st.caption("브라우저에서 자동 압축 후 전송됩니다 (13MB → ~300KB/장)")
+st.caption("브라우저에서 WebP 압축 후 전송 (투명 배경 유지, 13MB → ~400KB/장)")
 
 compressed_data = image_compressor(key="img_upload")
 
+# session_state에 저장 (버튼 클릭 시 rerun 되어도 유지)
 if compressed_data:
+    st.session_state["image_data"] = compressed_data
+
+if "image_data" in st.session_state:
     try:
-        items = json.loads(compressed_data)
-        st.success(f"{len(items)}개 이미지 수신 완료")
+        items = json.loads(st.session_state["image_data"])
+        total_kb = sum(it.get("size_compressed", 0) for it in items) / 1024
+        st.success(f"{len(items)}개 이미지 수신 완료 (전송 크기: {total_kb:.0f}KB)")
     except Exception:
         pass
 
@@ -263,7 +266,9 @@ template_file = st.file_uploader("빈 PPT 템플릿 (.pptx)", type=["pptx"])
 st.divider()
 
 if st.button("PPT 생성", type="primary", use_container_width=True):
-    if not compressed_data:
+    image_data = st.session_state.get("image_data")
+
+    if not image_data:
         st.error("이미지를 업로드하세요.")
     elif not template_file:
         st.error("PPT 템플릿을 업로드하세요.")
@@ -272,7 +277,7 @@ if st.button("PPT 생성", type="primary", use_container_width=True):
             tmp_dir = tempfile.mkdtemp()
 
             try:
-                file_map = save_compressed_images(compressed_data, tmp_dir)
+                file_map = save_compressed_images(image_data, tmp_dir)
 
                 if not file_map:
                     st.error("업로드된 이미지가 없습니다.")
