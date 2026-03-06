@@ -266,36 +266,57 @@ template_file = st.file_uploader("빈 PPT 템플릿 (.pptx)", type=["pptx"])
 st.divider()
 
 if has_images and template_file:
-    with st.spinner("PPT 생성 중..."):
-        tmp_dir = tempfile.mkdtemp()
+    # 입력 변경 감지용 키 생성
+    import hashlib
+    _cache_key = hashlib.md5(
+        (st.session_state["image_data"] + template_file.name).encode()
+    ).hexdigest()
 
-        try:
-            file_map = save_compressed_images(st.session_state["image_data"], tmp_dir)
+    # 입력이 변경된 경우에만 PPT 재생성
+    if st.session_state.get("ppt_cache_key") != _cache_key:
+        with st.spinner("PPT 생성 중..."):
+            tmp_dir = tempfile.mkdtemp()
 
-            if not file_map:
-                st.error("업로드된 이미지가 없습니다.")
-            else:
-                progress = st.progress(0)
-                template_bytes = template_file.read()
+            try:
+                file_map = save_compressed_images(st.session_state["image_data"], tmp_dir)
 
-                output, count = generate_ppt(template_bytes, file_map, progress)
-                progress.progress(1.0)
+                if not file_map:
+                    st.error("업로드된 이미지가 없습니다.")
+                else:
+                    progress = st.progress(0)
+                    template_bytes = template_file.read()
 
-                st.success(f"{count}개 디자인 × 2 = {count * 2}개 슬라이드 생성 완료!")
-                st.download_button(
-                    label="📥 PPT 다운로드",
-                    data=output,
-                    file_name=f"{os.path.splitext(template_file.name)[0]}_완료.pptx",
-                    mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                    use_container_width=True,
-                )
+                    output, count = generate_ppt(template_bytes, file_map, progress)
+                    progress.progress(1.0)
 
-        except Exception as e:
-            st.error(f"오류: {e}")
-        finally:
-            import shutil
-            shutil.rmtree(tmp_dir, ignore_errors=True)
+                    # 결과를 session_state에 캐시
+                    st.session_state["ppt_cache_key"] = _cache_key
+                    st.session_state["ppt_output"] = output.getvalue()
+                    st.session_state["ppt_count"] = count
+                    st.session_state["ppt_filename"] = f"{os.path.splitext(template_file.name)[0]}_완료.pptx"
+
+            except Exception as e:
+                st.error(f"오류: {e}")
+            finally:
+                import shutil
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    # 캐시된 결과가 있으면 다운로드 버튼 표시
+    if "ppt_output" in st.session_state and st.session_state.get("ppt_cache_key") == _cache_key:
+        count = st.session_state["ppt_count"]
+        st.success(f"{count}개 디자인 × 2 = {count * 2}개 슬라이드 생성 완료!")
+        st.download_button(
+            label="📥 PPT 다운로드",
+            data=st.session_state["ppt_output"],
+            file_name=st.session_state["ppt_filename"],
+            mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            use_container_width=True,
+        )
 else:
+    # 입력이 빠지면 캐시 초기화
+    for k in ("ppt_cache_key", "ppt_output", "ppt_count", "ppt_filename"):
+        st.session_state.pop(k, None)
+
     if not has_images and not template_file:
         st.info("이미지와 PPT 템플릿을 업로드하면 자동으로 생성됩니다.")
     elif not has_images:
